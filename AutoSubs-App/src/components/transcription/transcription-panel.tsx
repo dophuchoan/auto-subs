@@ -17,6 +17,11 @@ import type { TranscriptionOptions, EnsureModelsRequest, EnsureModelsResponse } 
 import { getActiveCensorWords } from "@/censor/merge";
 import { TranscriptionPanelView } from "./transcription-panel-view";
 import { describeError } from "./utils";
+import {
+  newBatchQueueItem,
+  srtPathForVideo,
+  type BatchQueueItem,
+} from "./batch-queue";
 
 interface TranscriptionPanelProps {
   onViewSubtitles?: () => void;
@@ -34,6 +39,7 @@ export function TranscriptionPanel({
     speakers,
     processTranscriptionResults,
     exportSubtitlesAs,
+    exportSubtitlesToPath,
     loadSubtitles,
   } = useSubtitleDocument();
   const {
@@ -151,6 +157,7 @@ export function TranscriptionPanel({
   } = useProgress();
   const { showError } = useErrorDialog();
   const { t: tErr } = useTranslation();
+  const { t } = useTranslation();
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [, setTranscriptionProgress] = React.useState(0);
@@ -163,12 +170,61 @@ export function TranscriptionPanel({
   const [fileInputSelectionId, setFileInputSelectionId] = React.useState(0);
   const [openModelSelector, setOpenModelSelector] = React.useState(false);
   const [showSubSlate, setShowSubSlate] = React.useState(false);
+  // Batch queue (standalone file mode only). A single file behaves exactly
+  // as before; 2+ files run sequentially through the same per-file path.
+  const [queue, setQueue] = React.useState<BatchQueueItem[]>([]);
+  const [batchSummary, setBatchSummary] = React.useState<string | null>(null);
+  const [batchProgress, setBatchProgress] = React.useState<string | null>(null);
   const isSmallScreen = useMediaQuery("(max-width: 640px)");
   const progressContainerRef = React.useRef<HTMLDivElement>(null);
   const lastSubtitleLoadKeyRef = React.useRef<string | null>(null);
 
   const handleSelectedFileChange = React.useCallback((file: string | null) => {
     setFileInput(file);
+    setFileInputSelectionId((v) => v + 1);
+  }, []);
+
+  const updateQueueItem = React.useCallback(
+    (path: string, patch: Partial<BatchQueueItem>) => {
+      setQueue((prev) =>
+        prev.map((item) => (item.path === path ? { ...item, ...patch } : item)),
+      );
+    },
+    [],
+  );
+
+  /** Append files to the batch queue (dedupe by path). First file becomes the preview. */
+  const handleAddFiles = React.useCallback(
+    (files: string[]) => {
+      const fresh = files.filter((f) => !queue.some((q) => q.path === f));
+      if (fresh.length === 0) return;
+      setQueue((prev) => [...prev, ...fresh.map(newBatchQueueItem)]);
+      setBatchSummary(null);
+      if (!fileInput) {
+        setFileInput(fresh[0]);
+        setFileInputSelectionId((v) => v + 1);
+      }
+    },
+    [queue, fileInput],
+  );
+
+  const handleRemoveQueueFile = React.useCallback(
+    (path: string) => {
+      if (isProcessing) return;
+      const next = queue.filter((item) => item.path !== path);
+      setQueue(next);
+      if (fileInput === path) {
+        setFileInput(next[0]?.path ?? null);
+        setFileInputSelectionId((v) => v + 1);
+      }
+      setBatchSummary(null);
+    },
+    [queue, fileInput, isProcessing],
+  );
+
+  /** Clicking a queue row only changes the preview, not the run order. */
+  const handleSelectQueueFile = React.useCallback((path: string) => {
+    setFileInput(path);
     setFileInputSelectionId((v) => v + 1);
   }, []);
 
@@ -260,6 +316,9 @@ export function TranscriptionPanel({
     setLabeledProgress(null);
     cancelRequestedRef.current = false;
     setFileInput(null);
+    setQueue([]);
+    setBatchSummary(null);
+    setBatchProgress(null);
     if (effectiveMode === "timeline") {
       await refreshAudioTracks();
     }
@@ -272,6 +331,189 @@ export function TranscriptionPanel({
     setIsExporting,
     setFileInput,
   ]);
+
+  /**
+   * One file through the exact same pipeline as the single-file flow:
+   * audio source -> transcribe_audio (same options incl. translate /
+   * targetLanguage) -> save the JSON transcript doc. Returns the formatted
+   * display segments/speakers that were saved. Throws on failure.
+   */
+  const transcribeWithAudio = async (
+    audioInfo: { path: string; offset: number },
+    modelPaths: EnsureModelsResponse,
+    speakerLimit: number | null,
+    filePath: string | null,
+  ) => {
+    const options: TranscriptionOptions = {
+      audioPath: audioInfo.path,
+      offset: Math.round(audioInfo.offset * 1000) / 1000,
+      model: modelsState[model].value,
+      lang: language,
+      translate,
+      targetLanguage,
+      enableDtw: enableDTW,
+      enableVad,
+      enableForcedAlignment: willUseForcedAlignment,
+      enableGpu,
+      enableDiarize,
+      maxSpeakers: speakerLimit,
+      diarizeBackend,
+      density: textDensity,
+      maxLines: Math.max(1, Math.floor(maxLinesPerSubtitle ?? 1)),
+      // Custom density sends only the active unit's limit; the backend
+      // prefers words for space-separated scripts.
+      customMaxCharsPerLine:
+        textDensity === "custom" && customDensityUnit !== "words"
+          ? Math.max(1, Math.floor(customMaxCharsPerLine ?? 1))
+          : undefined,
+      customMaxWordsPerLine:
+        textDensity === "custom" && customDensityUnit === "words"
+          ? Math.max(1, Math.floor(customMaxWordsPerLine ?? 1))
+          : undefined,
+      textCase,
+      removePunctuation,
+      censoredWords: enableCensor ? getActiveCensorWords(useSettingsStore.getState()) : [],
+      censorStyle,
+      customPrompt: customPrompt.trim() || undefined,
+      asrModelPath: modelPaths.asrModelPath,
+      vadModelPath: modelPaths.vadModelPath,
+      diarizeSegmentPath: modelPaths.diarizeSegmentPath,
+      diarizeEmbeddingPath: modelPaths.diarizeEmbeddingPath,
+      diarizeSortformerPath: modelPaths.diarizeSortformerPath,
+      alignerModelDir: modelPaths.alignerDir,
+    };
+
+    const transcript = await invoke("transcribe_audio", { options });
+
+    return processTranscriptionResults(
+      transcript as any,
+      useSettingsStore.getState(),
+      filePath,
+      timelineInfo.timelineId,
+    );
+  };
+
+  /**
+   * Batch run: same settings for every file, strictly one at a time (one
+   * model/GPU at a time). Models are ensured once up front. After each
+   * file the formatted segments are written straight to
+   * `<video-name>.srt` next to the source video, no save dialog. A failed
+   * file is marked failed and the loop continues; cancellation stops the
+   * loop between files and leaves the interrupted file queued.
+   */
+  const runBatchQueue = async () => {
+    const items = queue;
+    cancelRequestedRef.current = false;
+    setIsProcessing(true);
+    setTranscriptionProgress(0);
+    setBatchSummary(null);
+    clearProgressSteps();
+
+    setupEventListeners({
+      targetLanguage,
+      language,
+      enableForcedAlignment: willUseForcedAlignment,
+      enableDiarize,
+      audioInputMode: effectiveMode,
+    });
+
+    try {
+      const speakerLimit =
+        typeof maxSpeakers === "number" && !isNaN(maxSpeakers)
+          ? Math.floor(maxSpeakers) || null
+          : null;
+
+      const ensureModelsRequest: EnsureModelsRequest = {
+        model: modelsState[model].value,
+        enableVad,
+        enableDiarize,
+        enableForcedAlignment: willUseForcedAlignment,
+        maxSpeakers: speakerLimit,
+        diarizeBackend,
+      };
+
+      const modelPaths = await invoke<EnsureModelsResponse>("ensure_models", {
+        request: ensureModelsRequest,
+      });
+
+      let done = 0;
+      let failed = 0;
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (cancelRequestedRef.current) break;
+
+        updateQueueItem(item.path, { status: "running", error: undefined });
+        setFileInput(item.path);
+        setFileInputSelectionId((v) => v + 1);
+        clearProgressSteps();
+        setBatchProgress(
+          t("batchQueue.fileOf", { current: i + 1, total: items.length }),
+        );
+
+        try {
+          const audioInfo = await getSourceAudio(
+            "file",
+            item.path,
+            activeSelectedTracks,
+          );
+          if (!audioInfo) {
+            throw new Error("Audio source unavailable (cancelled or missing)");
+          }
+          const result = await transcribeWithAudio(
+            audioInfo,
+            modelPaths,
+            speakerLimit,
+            item.path,
+          );
+          const srtPath = await srtPathForVideo(item.path);
+          await exportSubtitlesToPath("srt", srtPath, result.segments, result.speakers);
+          completeAllProgressSteps();
+          updateQueueItem(item.path, { status: "done", srtPath });
+          done += 1;
+        } catch (error) {
+          const isCancellation =
+            (error instanceof Error && /cancell?ed/i.test(error.message)) ||
+            (typeof error === "string" && /cancell?ed/i.test(error));
+          if (isCancellation || cancelRequestedRef.current) {
+            updateQueueItem(item.path, { status: "queued", error: undefined });
+            cancelAllProgressSteps();
+            break;
+          }
+          const { message } = describeError(
+            error,
+            tErr("errorDialog.transcriptionFailed", "Transcription failed"),
+          );
+          updateQueueItem(item.path, { status: "failed", error: message });
+          failed += 1;
+          cancelAllProgressSteps();
+        }
+      }
+
+      const remaining = items.length - done - failed;
+      setBatchSummary(
+        t("batchQueue.summary", { done, failed, remaining }),
+      );
+
+      if (done > 0) {
+        await onTranscriptCreated?.();
+        onViewSubtitles?.();
+        const nextCount = (transcriptionsCompleted ?? 0) + done;
+        updateSetting("transcriptionsCompleted", nextCount);
+        if (nextCount >= 10 && !subSlateMilestoneShown) {
+          setShowSubSlate(true);
+        }
+      }
+    } finally {
+      setIsProcessing(false);
+      setTranscriptionProgress(0);
+      setIsExporting(false);
+      setExportProgress(0);
+      setLabeledProgress(null);
+      setBatchProgress(null);
+      await checkDownloadedModels();
+    }
+  };
 
   const handleStartTranscription = async () => {
     if (effectiveMode === "timeline" && !timelineInfo.timelineId) {
@@ -290,6 +532,12 @@ export function TranscriptionPanel({
         title: tErr("errorDialog.sameLanguageSourceAndTarget.title", "Source and target language are the same"),
         message: tErr("errorDialog.sameLanguageSourceAndTarget.message", "Please choose a different source or target language before translating."),
       });
+      return;
+    }
+
+    // 2+ files in standalone file mode: sequential batch run.
+    if (effectiveMode === "file" && queue.length > 1) {
+      await runBatchQueue();
       return;
     }
 
@@ -336,55 +584,10 @@ export function TranscriptionPanel({
         return;
       }
 
-      const options: TranscriptionOptions = {
-        audioPath: audioInfo.path,
-        offset: Math.round(audioInfo.offset * 1000) / 1000,
-        model: modelsState[model].value,
-        lang: language,
-        translate,
-        targetLanguage,
-        enableDtw: enableDTW,
-        enableVad,
-        enableForcedAlignment: willUseForcedAlignment,
-        enableGpu,
-        enableDiarize,
-        maxSpeakers: speakerLimit,
-        diarizeBackend,
-        density: textDensity,
-        maxLines: Math.max(1, Math.floor(maxLinesPerSubtitle ?? 1)),
-        // Custom density sends only the active unit's limit; the backend
-        // prefers words for space-separated scripts.
-        customMaxCharsPerLine:
-          textDensity === "custom" && customDensityUnit !== "words"
-            ? Math.max(1, Math.floor(customMaxCharsPerLine ?? 1))
-            : undefined,
-        customMaxWordsPerLine:
-          textDensity === "custom" && customDensityUnit === "words"
-            ? Math.max(1, Math.floor(customMaxWordsPerLine ?? 1))
-            : undefined,
-        textCase,
-        removePunctuation,
-        censoredWords: enableCensor ? getActiveCensorWords(useSettingsStore.getState()) : [],
-        censorStyle,
-        customPrompt: customPrompt.trim() || undefined,
-        asrModelPath: modelPaths.asrModelPath,
-        vadModelPath: modelPaths.vadModelPath,
-        diarizeSegmentPath: modelPaths.diarizeSegmentPath,
-        diarizeEmbeddingPath: modelPaths.diarizeEmbeddingPath,
-        diarizeSortformerPath: modelPaths.diarizeSortformerPath,
-        alignerModelDir: modelPaths.alignerDir,
-      };
-
-      const transcript = await invoke("transcribe_audio", { options });
+      await transcribeWithAudio(audioInfo, modelPaths, speakerLimit, fileInput);
 
       completeAllProgressSteps();
 
-      await processTranscriptionResults(
-        transcript as any,
-        useSettingsStore.getState(),
-        fileInput,
-        timelineInfo.timelineId,
-      );
       await onTranscriptCreated?.();
       onViewSubtitles?.();
 
@@ -493,6 +696,12 @@ export function TranscriptionPanel({
             timelineInfo={timelineInfo}
             selectedFile={fileInput}
             onSelectedFileChange={handleSelectedFileChange}
+            queue={effectiveMode === "file" ? queue : undefined}
+            onAddFiles={handleAddFiles}
+            onRemoveQueueFile={handleRemoveQueueFile}
+            onSelectQueueFile={handleSelectQueueFile}
+            batchSummary={batchSummary}
+            batchProgressLabel={batchProgress}
             onStart={handleStartTranscription}
             onCancel={handleCancelTranscription}
             onStartNewTranscription={handleStartNewTranscription}

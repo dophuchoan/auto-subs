@@ -698,5 +698,17 @@
     "addToTimelineFailed": "Untertitel konnten nicht zur Timeline hinzugefügt werden",
     "clipsBlocked": "Untertitel konnten nicht auf der Ausgabespur platziert werden. 'Add to New Track' wählen.",
     "reformatFailed": "Formatfehler"
+  },
+  "batchQueue": {
+    "title": "Batch queue",
+    "addFiles": "Add files",
+    "remove": "Remove",
+    "statusQueued": "Queued",
+    "statusRunning": "Running",
+    "statusDone": "Done",
+    "statusFailed": "Failed",
+    "fileOf": "File {{current}} of {{total}}",
+    "summary": "{{done}} done, {{failed}} failed, {{remaining}} left",
+    "cancelled": "Cancelled"
   }
 }

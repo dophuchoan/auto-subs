@@ -718,5 +718,17 @@
     "addToTimelineFailed": "Couldn't add subtitles to timeline",
     "clipsBlocked": "Couldn't place captions on the output track. Try 'Add to New Track'.",
     "reformatFailed": "Reformat failed"
+  },
+  "batchQueue": {
+    "title": "Batch queue",
+    "addFiles": "Add files",
+    "remove": "Remove",
+    "statusQueued": "Queued",
+    "statusRunning": "Running",
+    "statusDone": "Done",
+    "statusFailed": "Failed",
+    "fileOf": "File {{current}} of {{total}}",
+    "summary": "{{done}} done, {{failed}} failed, {{remaining}} left",
+    "cancelled": "Cancelled"
   }
 }

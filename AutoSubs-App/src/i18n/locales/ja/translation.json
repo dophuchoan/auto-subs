@@ -698,5 +698,17 @@
     "addToTimelineFailed": "字幕をタイムラインに追加できませんでした",
     "clipsBlocked": "出力トラックにキャプションを配置できませんでした。「Add to New Track」を試してください。",
     "reformatFailed": "再整形に失敗"
+  },
+  "batchQueue": {
+    "title": "Batch queue",
+    "addFiles": "Add files",
+    "remove": "Remove",
+    "statusQueued": "Queued",
+    "statusRunning": "Running",
+    "statusDone": "Done",
+    "statusFailed": "Failed",
+    "fileOf": "File {{current}} of {{total}}",
+    "summary": "{{done}} done, {{failed}} failed, {{remaining}} left",
+    "cancelled": "Cancelled"
   }
 }

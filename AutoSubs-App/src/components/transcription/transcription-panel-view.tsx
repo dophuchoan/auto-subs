@@ -28,6 +28,7 @@ import { LanguageButton } from "./language-button";
 import { FormatRow } from "./format-row";
 import { OptionsRow } from "./options-row";
 import { isSupportedMediaFile, type ProcessingStep } from "./utils";
+import type { BatchQueueItem } from "./batch-queue";
 
 export interface TranscriptionPanelViewProps {
   modelsState: Model[];
@@ -49,6 +50,13 @@ export interface TranscriptionPanelViewProps {
   timelineInfo: TimelineInfo;
   selectedFile?: string | null;
   onSelectedFileChange?: (file: string | null) => void;
+  /** Batch queue (standalone file mode). Undefined in timeline mode. */
+  queue?: BatchQueueItem[];
+  onAddFiles?: (files: string[]) => void;
+  onRemoveQueueFile?: (path: string) => void;
+  onSelectQueueFile?: (path: string) => void;
+  batchSummary?: string | null;
+  batchProgressLabel?: string | null;
   onStart?: () => void;
   onCancel?: () => void;
   onStartNewTranscription: () => void | Promise<void>;
@@ -77,6 +85,12 @@ export function TranscriptionPanelView({
   timelineInfo,
   selectedFile: selectedFileProp,
   onSelectedFileChange,
+  queue,
+  onAddFiles,
+  onRemoveQueueFile,
+  onSelectQueueFile,
+  batchSummary,
+  batchProgressLabel,
   onStart,
   onCancel,
   onStartNewTranscription,
@@ -124,9 +138,14 @@ export function TranscriptionPanelView({
         if (event.payload.type === "drop") {
           const files = event.payload.paths as string[] | undefined;
           if (files && files.length > 0) {
-            const supportedFile = files.find(isSupportedMediaFile);
-            if (supportedFile) {
-              setSelectedFile(supportedFile);
+            const supportedFiles = files.filter(isSupportedMediaFile);
+            if (supportedFiles.length > 0) {
+              // Batch mode: add every supported file to the queue.
+              if (onAddFiles) {
+                onAddFiles(supportedFiles);
+              } else {
+                setSelectedFile(supportedFiles[0]);
+              }
             }
           }
         }
@@ -135,7 +154,7 @@ export function TranscriptionPanelView({
     return () => {
       if (unlisten) unlisten();
     };
-  }, [setSelectedFile]);
+  }, [setSelectedFile, onAddFiles]);
 
   const handleRefreshAudioTracks = React.useCallback(async () => {
     if (!onRefreshAudioTracks || isRefreshingTracks) return;
@@ -197,7 +216,9 @@ export function TranscriptionPanelView({
     selectedTrackCount > 0 &&
     inputTracks.length > 0
       ? `${t("common.generateSubtitles")} (${selectedTrackCount})`
-      : t("common.generateSubtitles");
+      : audioInputMode === "file" && queue && queue.length > 1
+        ? `${t("common.generateSubtitles")} (${queue.length})`
+        : t("common.generateSubtitles");
 
   return (
     <div className="h-full flex flex-col relative">
@@ -207,6 +228,12 @@ export function TranscriptionPanelView({
       />
 
       <div className="flex-1 min-h-0 flex flex-col p-3.5 pt-1.5 pb-4">
+        {showProcessing && batchProgressLabel ? (
+          <p className="flex-shrink-0 pb-1 text-xs font-medium text-muted-foreground">
+            {batchProgressLabel}
+          </p>
+        ) : null}
+
         {showProcessing && (
           <ProcessingStepsList
             steps={processingSteps}
@@ -217,6 +244,11 @@ export function TranscriptionPanelView({
 
         {hasCompletedRun ? (
           <div className="flex-shrink-0 pt-3 flex flex-col gap-2.5">
+            {batchSummary ? (
+              <p className="rounded-xl border bg-muted/40 px-3 py-2 text-xs font-medium text-foreground">
+                {batchSummary}
+              </p>
+            ) : null}
             <CompletionStepItem
               onExportToFile={onExportToFile}
               onViewSubtitles={onViewSubtitles}
@@ -279,6 +311,11 @@ export function TranscriptionPanelView({
                       <FileDropArea
                         selectedFile={selectedFile}
                         onSelectedFileChange={setSelectedFile}
+                        queue={queue}
+                        onAddFiles={onAddFiles}
+                        onRemoveFile={onRemoveQueueFile}
+                        onSelectFile={onSelectQueueFile}
+                        isProcessing={isProcessing}
                         className={cn(
                           "row-start-1 col-start-1 transition-opacity",
                           audioInputMode !== "file" && "opacity-0 pointer-events-none"

@@ -23,6 +23,7 @@ import {
   buildSubtitleExportContent,
   subtitleExportDialogOptions,
   type SubtitleExportFormat,
+  type SubtitleExportTextFormat,
 } from '@/utils/export-file';
 import {
   canExportSubtitles,
@@ -69,9 +70,16 @@ interface SubtitleDocumentContextType {
   updateSpeakers: (newSpeakers: Speaker[]) => Promise<void>;
   updateSubtitles: (newSubtitles: Subtitle[], filename?: string) => Promise<void>;
   flushPendingSubtitleSave: () => Promise<void>;
-  processTranscriptionResults: (transcript: any, settings: Settings, fileInput: string | null, timelineId: string) => Promise<string>;
+  processTranscriptionResults: (transcript: any, settings: Settings, fileInput: string | null, timelineId: string) => Promise<{ filename: string; segments: Subtitle[]; speakers: Speaker[] }>;
   reformatSubtitles: (settings: Settings, fileInput: string | null, timelineId: string) => Promise<void>;
   exportSubtitlesAs: (format: SubtitleExportFormat, subtitles?: Subtitle[], speakers?: Speaker[]) => Promise<void>;
+  /**
+   * Dialog-free export used by the batch queue: writes `content` for the
+   * given segments/speakers straight to `targetPath` (e.g. the .srt next to
+   * a source video). Throws on failure so the caller can mark that file
+   * failed and continue with the next one; it never shows a toast or dialog.
+   */
+  exportSubtitlesToPath: (format: SubtitleExportTextFormat, targetPath: string, subtitles?: Subtitle[], speakers?: Speaker[]) => Promise<void>;
   importSubtitles: (settings: Settings, fileInput: string | null, timelineId: string) => Promise<void>;
   loadSubtitles: (audioInputMode: "file" | "timeline", fileInput: string | null, timelineId: string) => Promise<void>;
   openStoredSubtitleDocument: (filename: string, transcript: any) => void;
@@ -206,14 +214,18 @@ export function SubtitleDocumentProvider({ children }: { children: React.ReactNo
   }, [currentSubtitleDocumentFilename]);
 
   /**
-   * Processes transcription results
+   * Processes transcription results. Returns the saved document filename
+   * AND the formatted display segments/speakers that were saved, so a
+   * caller (the batch queue) can export exactly what is on screen without
+   * re-reading React state (stale mid-loop) or the raw transcript fields
+   * (pre-formatting, untranslated word data).
    */
   const processTranscriptionResults = async (
     transcript: any, 
     settings: Settings, 
     fileInput: string | null, 
     timelineId: string
-  ): Promise<string> => {
+  ): Promise<{ filename: string; segments: Subtitle[]; speakers: Speaker[] }> => {
     // Generate filename for new transcript based on mode and input
     const filename = generateSubtitleDocumentFilename(
       settings.audioInputMode === "file",
@@ -257,7 +269,26 @@ export function SubtitleDocumentProvider({ children }: { children: React.ReactNo
     // (important when settings.language === "auto").
     loadFontForLanguage(transcript?.language);
 
-    return filename
+    return { filename, segments, speakers }
+  }
+
+  async function exportSubtitlesToPath(
+    format: SubtitleExportTextFormat,
+    targetPath: string,
+    subtitlesParam?: Subtitle[],
+    speakersParam?: Speaker[],
+  ) {
+    const subtitlesToExport = subtitlesParam ?? subtitlesRef.current;
+    const speakersToExport = speakersParam ?? speakersRef.current;
+    if (!canExportSubtitles(subtitlesToExport)) {
+      throw new Error('No subtitles available to export');
+    }
+    const content = buildSubtitleExportContent(format, subtitlesToExport, speakersToExport);
+    if (!content || content.trim() === '') {
+      throw new Error(`Generated ${format} data is empty`);
+    }
+    await writeTextFile(targetPath, content);
+    console.log(`${format} file saved successfully to`, targetPath);
   }
 
   const reformatSubtitles = async (settings: Settings, fileInput: string | null, timelineId: string) => {
@@ -500,6 +531,7 @@ export function SubtitleDocumentProvider({ children }: { children: React.ReactNo
       processTranscriptionResults,
       reformatSubtitles,
       exportSubtitlesAs,
+      exportSubtitlesToPath,
       importSubtitles,
       loadSubtitles,
       openStoredSubtitleDocument,

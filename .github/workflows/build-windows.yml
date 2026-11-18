@@ -1,0 +1,109 @@
+name: Build Windows exe (batch fork, unsigned)
+
+# Build tay tren GitHub, khong can may Windows.
+# Cach chay:
+#  - Tu dong: push file nay len nhanh batch-queue (duong dan duoi day).
+#  - Tay: tab Actions -> chon workflow nay -> Run workflow.
+# Ket qua: file cai dat AutoSubs_*_x64-setup.exe trong muc Artifacts,
+# va trong Release co tag batch-v3.11.0 (tai truc tiep, khong can dang nhap).
+# Luu y: ban build KHONG co chu ky (unsigned) nen Windows se hien canh bao
+# SmartScreen khi cai; bam "More info" -> "Run anyway".
+# Workflow nay CHUA duoc chay thu lan nao.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [batch-queue]
+    paths: [.github/workflows/build-windows.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      CARGO_TARGET_DIR: C:\cargo-target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install LLVM (libclang, can cho bindgen)
+        run: winget install --id LLVM.LLVM --accept-source-agreements --accept-package-agreements
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Install Vulkan SDK
+        # Neu buoc nay loi, thay bang cach tai truc tiep tu https://vulkan.lunarg.com/sdk/home
+        run: choco install vulkan-sdk -y
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix Adobe-Extension
+          npm ci --prefix AutoSubs-App
+
+      - name: Download ffmpeg sidecar (Windows)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          cd AutoSubs-App/src-tauri
+          New-Item -ItemType Directory -Force -Path binaries | Out-Null
+          cd binaries
+          gh release download --repo tmoroney/ffmpeg-binaries --pattern "ffmpeg-x86_64-pc-windows-msvc.zip" --clobber
+          Expand-Archive -Path "ffmpeg-x86_64-pc-windows-msvc.zip" -DestinationPath . -Force
+          if (Test-Path "ffmpeg.exe") { Rename-Item "ffmpeg.exe" "ffmpeg-x86_64-pc-windows-msvc.exe" -Force }
+          if (Test-Path "ffmpeg-x86_64-pc-windows-msvc") { Rename-Item "ffmpeg-x86_64-pc-windows-msvc" "ffmpeg-x86_64-pc-windows-msvc.exe" -Force }
+          Get-ChildItem
+
+      - name: Tat ky ten + updater (ban build ca nhan, khong co cert cua tac gia)
+        shell: python
+        run: |
+          import json
+          p = "AutoSubs-App/src-tauri/tauri.conf.json"
+          d = json.load(open(p, encoding="utf-8"))
+          w = d.get("bundle", {}).get("windows", {})
+          for k in ["signCommand", "certificateThumbprint", "timestampUrl", "digestAlgorithm"]:
+              w.pop(k, None)
+          d["bundle"]["createUpdaterArtifacts"] = False
+          with open(p, "w", encoding="utf-8") as f:
+              json.dump(d, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+          print("signing disabled, updater artifacts off")
+
+      - name: Build Tauri (Windows)
+        # KHONG dung `npm run build:win`: lenh do goi `dotenv` ma project
+        # khong cai dotenv (se loi 'dotenv' is not recognized). Go truc tiep
+        # lenh tauri, beforeBuildCommand trong tauri.conf.json se tu chay
+        # build:tauri-prep (web + Adobe extension).
+        run: |
+          cd AutoSubs-App
+          npx tauri build -- --no-default-features --features windows
+
+      - name: Upload installer exe (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoSubs-windows-batch
+          path: AutoSubs-App/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload installer exe (Release, public download)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoSubs-App/src-tauri/target/release/bundle/nsis/*.exe
+          tag_name: batch-v3.11.0
+          name: AutoSubs batch (Windows, unsigned)
+          body: "Ban build tay tu nhanh batch-queue: hang doi batch + dich EN-VI. Khong co chu ky (SmartScreen se canh bao khi cai)."
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true

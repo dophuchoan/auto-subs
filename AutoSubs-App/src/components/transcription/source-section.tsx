@@ -3,6 +3,7 @@ import {
   AudioLines,
   MonitorIcon,
   RefreshCw,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -20,6 +21,10 @@ import { useSettingsStore } from "@/stores/settings-store";
 import type { Integration } from "@/contexts/IntegrationContext";
 import type { Track } from "@/types";
 import { SUPPORTED_MEDIA_EXTENSIONS, isVideoExtension } from "./utils";
+import {
+  batchFileName,
+  type BatchQueueItem,
+} from "./batch-queue";
 import { MediaPlayer } from "@/components/media/media-player";
 import { FileIcon } from "@untitledui/file-icons";
 
@@ -73,6 +78,12 @@ interface FileDropAreaProps {
   selectedFile: string | null;
   onSelectedFileChange: (file: string | null) => void;
   className?: string;
+  /** Batch queue (standalone file mode). When provided, picking files appends to it. */
+  queue?: BatchQueueItem[];
+  onAddFiles?: (files: string[]) => void;
+  onRemoveFile?: (path: string) => void;
+  onSelectFile?: (path: string) => void;
+  isProcessing?: boolean;
 }
 
 function getFileName(filePath: string): string {
@@ -111,6 +122,11 @@ export function FileDropArea({
   selectedFile,
   onSelectedFileChange,
   className = "min-h-0 flex-1",
+  queue,
+  onAddFiles,
+  onRemoveFile,
+  onSelectFile,
+  isProcessing = false,
 }: FileDropAreaProps) {
   const { t } = useTranslation();
   const iconRef = React.useRef<UploadIconHandle>(null);
@@ -123,8 +139,8 @@ export function FileDropArea({
   );
 
   const handleFileSelect = React.useCallback(async () => {
-    const file = await open({
-      multiple: false,
+    const picked = await open({
+      multiple: true,
       directory: false,
       filters: [
         {
@@ -134,8 +150,28 @@ export function FileDropArea({
       ],
       defaultPath: await downloadDir(),
     });
-    onSelectedFileChange(file);
-  }, [t, onSelectedFileChange]);
+    const files = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (files.length === 0) return;
+    // Batch mode: append to the queue (the panel dedupes by path).
+    if (onAddFiles) {
+      onAddFiles(files);
+      return;
+    }
+    onSelectedFileChange(files[0]);
+  }, [t, onSelectedFileChange, onAddFiles]);
+
+  const statusLabel = (item: BatchQueueItem) => {
+    switch (item.status) {
+      case "running":
+        return t("batchQueue.statusRunning");
+      case "done":
+        return t("batchQueue.statusDone");
+      case "failed":
+        return t("batchQueue.statusFailed");
+      default:
+        return t("batchQueue.statusQueued");
+    }
+  };
 
   return (
     <div
@@ -204,6 +240,96 @@ export function FileDropArea({
           </div>
         </div>
       )}
+
+      {queue && queue.length > 0 ? (
+        <div
+          className="mt-3 flex w-full max-w-xl flex-col gap-1"
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-medium text-muted-foreground">
+              {t("batchQueue.title")} ({queue.length})
+            </span>
+            <button
+              type="button"
+              disabled={isProcessing}
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleFileSelect();
+              }}
+              className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-primary hover:bg-muted disabled:opacity-50"
+            >
+              {t("batchQueue.addFiles")}
+            </button>
+          </div>
+          <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
+            {queue.map((item) => (
+              <div
+                key={item.path}
+                role="button"
+                tabIndex={0}
+                onClick={() => onSelectFile?.(item.path)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelectFile?.(item.path);
+                  }
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-xl border px-2.5 py-1.5 text-left",
+                  item.path === selectedFile
+                    ? "border-primary/30 bg-muted/50"
+                    : "border-transparent bg-muted/20 hover:bg-muted/40",
+                )}
+              >
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                    item.status === "done" &&
+                      "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+                    item.status === "running" &&
+                      "bg-primary/15 text-primary",
+                    item.status === "failed" &&
+                      "bg-destructive/15 text-destructive",
+                    item.status === "queued" &&
+                      "bg-muted text-muted-foreground",
+                  )}
+                >
+                  {statusLabel(item)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium text-foreground">
+                    {batchFileName(item.path)}
+                  </span>
+                  {item.status === "failed" && item.error ? (
+                    <span className="block truncate text-[11px] text-destructive">
+                      {item.error}
+                    </span>
+                  ) : item.status === "done" && item.srtPath ? (
+                    <span className="block truncate text-[11px] text-muted-foreground">
+                      {item.srtPath}
+                    </span>
+                  ) : null}
+                </span>
+                {!isProcessing && item.status !== "running" ? (
+                  <button
+                    type="button"
+                    aria-label={t("batchQueue.remove")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRemoveFile?.(item.path);
+                    }}
+                    className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
